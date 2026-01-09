@@ -1,6 +1,6 @@
-# Grocery Web Scraper
+# Products Scraper
 
-A web scraping tool to extract product details from Walmart.ca and Metro.ca for the Pantry List app.
+A powerful web scraping tool that can scrape product data from any ecommerce website. Currently configured for Walmart.ca, Metro.ca, Loblaws, Sobeys, and FoodBasics, with support for Google Sheets integration.
 
 ## Features
 
