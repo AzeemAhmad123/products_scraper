@@ -254,7 +254,7 @@ class WalmartScraper(BaseScraper):
                         except:
                             return None
                 else:
-                return None
+                    return None
             
             # Wait longer for dynamic content to load - Walmart uses React/JS
             import time
@@ -338,7 +338,7 @@ class WalmartScraper(BaseScraper):
                 price_elem = soup.select_one(selector)
                 if price_elem:
                     price_text = price_elem.get_text(strip=True)
-            price = self._extract_price(price_text)
+                    price = self._extract_price(price_text)
                     if price:
                         break
             
@@ -354,14 +354,14 @@ class WalmartScraper(BaseScraper):
                 ]
                 for pattern in price_patterns:
                     price_match = re.search(pattern, page_text, re.IGNORECASE)
-                if price_match:
-                    try:
-                        price = float(price_match.group(1))
+                    if price_match:
+                        try:
+                            price = float(price_match.group(1))
                             if 0.5 <= price <= 1000:  # Reasonable price range
                                 logger.info(f"Found price in page text: ${price}")
                                 break
-                    except:
-                        pass
+                        except:
+                            pass
             
             # Extract original price if on sale
             original_price_elem = (soup.select_one('[class*="original-price"]') or
@@ -438,10 +438,10 @@ class WalmartScraper(BaseScraper):
             # Return product even if some fields are missing - as long as we have name
             # This is important because the page might have the data but our selectors might not match
             if name and name != 'Unknown Product' and len(name) > 3:
-            return Product(
-                name=name,
+                return Product(
+                    name=name,
                     price=price,  # Can be None
-                original_price=original_price,
+                    original_price=original_price,
                 image_url=image_url,
                 product_url=product_url,
                 description=description,
