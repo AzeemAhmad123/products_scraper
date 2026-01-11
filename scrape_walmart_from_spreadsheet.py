@@ -140,12 +140,31 @@ def save_to_output_file(results: List[Dict], output_file: str):
     logger.info(f"Results saved to {output_file} ({len(results)} products)")
 
 
+def load_row_numbers_from_file(row_numbers_file: str) -> set:
+    """Load row numbers from a text file"""
+    row_numbers = set()
+    try:
+        with open(row_numbers_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    try:
+                        row_numbers.add(int(line))
+                    except ValueError:
+                        pass
+        logger.info(f"Loaded {len(row_numbers)} row numbers from {row_numbers_file}")
+    except FileNotFoundError:
+        logger.warning(f"Row numbers file not found: {row_numbers_file}")
+    return row_numbers
+
+
 def scrape_all_products_from_spreadsheet(
     spreadsheet_path: str, 
     batch_size: int = 100,
     start_from: int = 0,
     resume: bool = True,
-    output_file: str = 'walmart_scraped_products_20260109_074637.json'
+    output_file: str = 'walmart_scraped_products_20260109_074637.json',
+    row_numbers_file: str = None
 ):
     """Scrape Walmart for all products in spreadsheet in batches"""
     
@@ -156,6 +175,14 @@ def scrape_all_products_from_spreadsheet(
     
     # Load products
     df = load_products_from_spreadsheet(spreadsheet_path)
+    
+    # Filter by row numbers if provided
+    if row_numbers_file:
+        row_numbers = load_row_numbers_from_file(row_numbers_file)
+        if row_numbers:
+            # Filter dataframe to only include specified rows (row numbers are 1-indexed)
+            df = df.iloc[[i for i in range(len(df)) if (i + 1) in row_numbers]].copy()
+            logger.info(f"Filtered to {len(df)} rows based on row numbers file")
     
     # Get unique product names
     product_names = df['Product'].unique().tolist()
@@ -319,6 +346,8 @@ if __name__ == '__main__':
                        help='Do not resume - process all products from start')
     parser.add_argument('--output-file', type=str, default='walmart_scraped_products_20260109_074637.json',
                        help='Output file to save results (default: walmart_scraped_products_20260109_074637.json)')
+    parser.add_argument('--row-numbers-file', type=str, default=None,
+                       help='Path to file containing row numbers to scrape (one per line)')
     
     args = parser.parse_args()
     
@@ -327,6 +356,7 @@ if __name__ == '__main__':
         batch_size=args.batch_size,
         start_from=args.start_from,
         resume=not args.no_resume,
-        output_file=args.output_file
+        output_file=args.output_file,
+        row_numbers_file=args.row_numbers_file
     )
 

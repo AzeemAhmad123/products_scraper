@@ -1,0 +1,30 @@
+================================================================================
+QUICK START - COMPUTER 2
+================================================================================
+
+COPY THIS COMMAND AND RUN IT ON COMPUTER 2:
+================================================================================
+
+python scrape_walmart_parallel.py --spreadsheet "WebsiteScrapper 2.ods" --row-numbers-file "unique_unscraped_rows_computer2.txt" --workers 2 --flush-size 5 --output-file "walmart_scraped_products_computer2.json"
+
+================================================================================
+
+WHAT THIS DOES:
+- Scrapes products from: unique_unscraped_rows_computer2.txt
+- Saves results to: walmart_scraped_products_computer2.json
+- Uses 2 Chrome browsers in parallel
+- Creates automatic backups
+
+REQUIRED FILES ON COMPUTER 2:
+1. scrape_walmart_parallel.py
+2. scrapers/ folder (entire folder)
+3. config.py
+4. WebsiteScrapper 2.ods
+5. unique_unscraped_rows_computer2.txt
+
+AFTER COMPUTER 2 FINISHES:
+1. Copy walmart_scraped_products_computer2.json to Computer 1
+2. On Computer 1, run: python merge_results_from_two_computers.py
+
+================================================================================
+

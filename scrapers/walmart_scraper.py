@@ -30,7 +30,22 @@ class WalmartScraper(BaseScraper):
             
             soup = self._get_page(search_url, use_selenium=True)
             if not soup:
-                return products
+                # Only return None if actually blocked (URL contains blocked)
+                # Otherwise try to continue
+                if self.driver:
+                    current_url = self.driver.current_url
+                    if "blocked" in current_url.lower():
+                        logger.warning(f"Actually blocked for {query} - skipping")
+                        return None
+                    else:
+                        # Not actually blocked, try to get page source anyway
+                        logger.warning(f"Page load issue for {query}, trying to extract from current page...")
+                        try:
+                            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                        except:
+                            return None
+                else:
+                    return None
             
             # Find product containers - Walmart uses various selectors
             # Try multiple selectors as Walmart's structure may vary
@@ -58,32 +73,9 @@ class WalmartScraper(BaseScraper):
                 try:
                     product = self._parse_product_element(element, soup)
                     if product:
-                        # Always try to get full details from product page for better accuracy
-                        # Especially if price seems wrong (too low) or missing
-                        should_fetch_details = (
-                            not product.price or 
-                            product.price < 1.0 or  # Suspiciously low price
-                            not product.description or
-                            not product.image_url
-                        )
-                        
-                        if should_fetch_details and product.product_url:
-                            logger.info(f"Fetching details from product page: {product.name[:50]}")
-                            detailed_product = self.get_product_details(product.product_url)
-                            if detailed_product:
-                                # Update with detailed info (prefer detailed version)
-                                if detailed_product.price:
-                                    product.price = detailed_product.price
-                                if detailed_product.description:
-                                    product.description = detailed_product.description
-                                if detailed_product.brand:
-                                    product.brand = detailed_product.brand
-                                if detailed_product.image_url:
-                                    product.image_url = detailed_product.image_url
-                                if detailed_product.size:
-                                    product.size = detailed_product.size
-                                self._delay()  # Be respectful
-                        
+                        # DON'T fetch details here - it's too slow and causes blocking
+                        # Details will be fetched later in search_walmart_for_product after selecting best match
+                        # This makes search much faster
                         products.append(product)
                 except Exception as e:
                     logger.error(f"Error parsing product element: {str(e)}")
@@ -92,7 +84,12 @@ class WalmartScraper(BaseScraper):
             self._delay()
             
         except Exception as e:
+            error_str = str(e).lower()
             logger.error(f"Error searching Walmart: {str(e)}")
+            # If session is invalid, return None to trigger browser recreation
+            if 'invalid session' in error_str or 'session' in error_str or 'no such window' in error_str:
+                logger.warning(f"Session lost during search, returning None to trigger browser recreation")
+                return None
         
         return products
     
@@ -243,43 +240,126 @@ class WalmartScraper(BaseScraper):
         try:
             soup = self._get_page(product_url, use_selenium=True)
             if not soup:
+                # Only skip if URL actually contains "blocked"
+                if self.driver:
+                    current_url = self.driver.current_url
+                    if "blocked" in current_url.lower():
+                        logger.warning(f"Actually blocked when getting product details from {product_url}")
+                        return None
+                    else:
+                        # Not actually blocked, try to extract from current page
+                        logger.warning(f"Page load issue, trying to extract from current page...")
+                        try:
+                            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                        except:
+                            return None
+                else:
                 return None
             
-            # Wait a bit for dynamic content
+            # Wait longer for dynamic content to load - Walmart uses React/JS
             import time
-            time.sleep(2)
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.by import By
             
-            # Refresh soup after dynamic content loads
             if self.driver:
+                # Wait for page to be interactive
+                try:
+                    WebDriverWait(self.driver, 10).until(
+                        lambda d: d.execute_script('return document.readyState') == 'complete'
+                    )
+                except:
+                    pass
+                
+                # Wait a bit more for React components
+                time.sleep(3)
+                
+                # Try to wait for product title to appear
+                try:
+                    WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "h1"))
+                    )
+                except:
+                    logger.warning("Product title not found, but continuing...")
+                
+                # Scroll to trigger lazy loading
+                self.driver.execute_script("window.scrollTo(0, 500);")
+                time.sleep(1)
+                self.driver.execute_script("window.scrollTo(0, 0);")
+                time.sleep(1)
+                
+                # Refresh soup after dynamic content loads
                 soup = BeautifulSoup(self.driver.page_source, 'html.parser')
             
-            # Extract product name - try multiple selectors
-            name_elem = (soup.select_one('h1[data-testid="product-title"]') or
-                        soup.select_one('h1[data-automation="product-title"]') or
-                        soup.select_one('h1[class*="product-title"]') or
-                        soup.select_one('h1[class*="ProductTitle"]') or
-                        soup.select_one('h1'))
+            # Extract product name - try multiple selectors with more variations
+            name_elem = None
+            name_selectors = [
+                'h1[data-testid="product-title"]',
+                'h1[data-automation="product-title"]',
+                'h1[class*="product-title"]',
+                'h1[class*="ProductTitle"]',
+                'h1[class*="productName"]',
+                'h1[class*="product-name"]',
+                'h1[itemprop="name"]',
+                'h1',
+                '[data-testid="product-title"]',
+                '[data-automation="product-title"]',
+                'span[class*="product-title"]',
+                'div[class*="product-title"]'
+            ]
+            
+            for selector in name_selectors:
+                name_elem = soup.select_one(selector)
+                if name_elem:
+                    name_text = name_elem.get_text(strip=True)
+                    if name_text and len(name_text) > 3 and name_text != 'Unknown Product':
+                        break
+            
             name = name_elem.get_text(strip=True) if name_elem else 'Unknown Product'
             
-            # Extract price - Walmart shows price in various formats
-            price_elem = (soup.select_one('span[data-automation="product-price"]') or
-                         soup.select_one('[data-testid="price"]') or
-                         soup.select_one('span[class*="price"]') or
-                         soup.select_one('div[class*="price"]') or
-                         soup.select_one('[itemprop="price"]') or
-                         soup.select_one('span[class*="currency"]'))
+            # Extract price - Walmart shows price in various formats - try many selectors
+            price = None
+            price_selectors = [
+                'span[data-automation="product-price"]',
+                '[data-testid="price"]',
+                '[data-automation="price"]',
+                'span[class*="price"]',
+                'div[class*="price"]',
+                '[itemprop="price"]',
+                'span[class*="currency"]',
+                '[class*="Price"]',
+                '[class*="price-current"]',
+                '[class*="current-price"]',
+                'span[class*="price-value"]',
+                'div[class*="price-value"]'
+            ]
             
-            price_text = price_elem.get_text(strip=True) if price_elem else ''
+            for selector in price_selectors:
+                price_elem = soup.select_one(selector)
+                if price_elem:
+                    price_text = price_elem.get_text(strip=True)
             price = self._extract_price(price_text)
+                    if price:
+                        break
             
-            # Also search in page text for price pattern
+            # Also search in page text for price pattern - more aggressive
             if not price:
                 page_text = soup.get_text()
-                # Look for patterns like "$4.47" or "Price: $4.47"
-                price_match = re.search(r'(?:price|cost)[\s:]*\$?\s*(\d+\.?\d{0,2})', page_text, re.IGNORECASE)
+                # Look for patterns like "$4.47", "$4", "Price: $4.47", etc.
+                price_patterns = [
+                    r'\$\s*(\d+\.\d{2})',  # $4.47
+                    r'\$\s*(\d+)',         # $4
+                    r'(?:price|cost)[\s:]*\$?\s*(\d+\.?\d{0,2})',  # Price: $4.47
+                    r'(\d+\.\d{2})\s*\$',  # 4.47$
+                ]
+                for pattern in price_patterns:
+                    price_match = re.search(pattern, page_text, re.IGNORECASE)
                 if price_match:
                     try:
                         price = float(price_match.group(1))
+                            if 0.5 <= price <= 1000:  # Reasonable price range
+                                logger.info(f"Found price in page text: ${price}")
+                                break
                     except:
                         pass
             
@@ -352,9 +432,15 @@ class WalmartScraper(BaseScraper):
                          soup.select_one('span[class*="sold-out"]'))
             in_stock = stock_elem is None
             
+            # Log what we extracted for debugging
+            logger.info(f"Extracted from product page - Name: {name[:50]}, Price: ${price}, Brand: {brand}, Size: {size}")
+            
+            # Return product even if some fields are missing - as long as we have name
+            # This is important because the page might have the data but our selectors might not match
+            if name and name != 'Unknown Product' and len(name) > 3:
             return Product(
                 name=name,
-                price=price,
+                    price=price,  # Can be None
                 original_price=original_price,
                 image_url=image_url,
                 product_url=product_url,
@@ -364,8 +450,13 @@ class WalmartScraper(BaseScraper):
                 in_stock=in_stock,
                 source=self.source_name
             )
+            else:
+                logger.warning(f"Could not extract valid product name from {product_url}")
+                return None
             
         except Exception as e:
             logger.error(f"Error getting product details from {product_url}: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
 

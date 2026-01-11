@@ -45,7 +45,7 @@ DEFAULT_STORES = [
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 # Selenium Configuration
-# Set to False for better results (less bot detection), but browser will be visible
-HEADLESS_BROWSER = os.getenv('HEADLESS_BROWSER', 'False').lower() == 'true'
+# Set to True for headless mode (browser not visible), False for visible mode
+HEADLESS_BROWSER = True
 BROWSER_TIMEOUT = int(os.getenv('BROWSER_TIMEOUT', '30'))
 

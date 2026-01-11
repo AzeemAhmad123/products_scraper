@@ -40,7 +40,7 @@ class BaseScraper(ABC):
             # Additional options for better stealth
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
-            options.add_argument(f'user-agent={USER_AGENT}')
+            options.add_argument(f'--user-agent={USER_AGENT}')
             
             # Use undetected-chromedriver (automatically handles bot detection)
             self.driver = uc.Chrome(
@@ -60,8 +60,16 @@ class BaseScraper(ABC):
     def _close_driver(self):
         """Close the WebDriver"""
         if self.driver:
+            try:
             self.driver.quit()
+            except:
+                pass
             self.driver = None
+    
+    def _recreate_driver(self):
+        """Recreate the Chrome driver (useful when blocked)"""
+        self._close_driver()
+        return self._get_driver()
     
     def _get_page(self, url: str, use_selenium: bool = False) -> Optional[BeautifulSoup]:
         """Fetch a page and return BeautifulSoup object"""
@@ -79,13 +87,31 @@ class BaseScraper(ABC):
                 time.sleep(1)
                 
                 html = driver.page_source
+                current_url = driver.current_url
                 
-                # Check if we got blocked
-                if "robot" in html.lower() or "captcha" in html.lower() or "not robots" in html.lower():
-                    logger.warning(f"Possible bot detection on {url}")
-                    # Try waiting longer
-                    time.sleep(5)
-                    html = driver.page_source
+                # Only skip if URL actually contains "blocked" - this means we're truly blocked
+                # Don't skip for warnings in page content, continue scraping
+                is_actually_blocked = "blocked" in current_url.lower()
+                
+                if is_actually_blocked:
+                    logger.warning(f"Actually blocked - URL contains 'blocked': {current_url}")
+                    logger.warning("Skipping this product and continuing to next...")
+                    return None
+                
+                # Log warnings but continue scraping
+                has_warning = (
+                    "robot" in html.lower() or 
+                    "captcha" in html.lower() or 
+                    "not robots" in html.lower() or
+                    "verify your identity" in html.lower() or
+                    "press & hold" in html.lower() or
+                    "press and hold" in html.lower() or
+                    "we like real shoppers" in html.lower()
+                )
+                
+                if has_warning:
+                    logger.warning(f"Bot detection warning on {url} - but continuing to scrape...")
+                    # Continue anyway - try to extract data
             else:
                 response = self.session.get(url, timeout=30)
                 response.raise_for_status()
