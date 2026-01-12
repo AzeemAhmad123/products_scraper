@@ -37,6 +37,13 @@ walmart_scraped_products_*.json
 product_search_*.json
 test_product_details.json
 
+# Backups
+backups/
+*.backup
+
+# Retry queue
+retry_queue.json
+
 # Credentials and tokens
 walmart-scraper-project-*.json
 client_secret_*.json

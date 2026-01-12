@@ -204,8 +204,8 @@ def main():
                        help='Name for new spreadsheet (if creating new one)')
     parser.add_argument('--worksheet-name', type=str, default='Walmart Products',
                        help='Name of the worksheet (default: Walmart Products)')
-    parser.add_argument('--credentials', type=str, default='walmart-scraper-project-82db0cf1ae60.json',
-                       help='Path to Google service account credentials JSON file')
+    parser.add_argument('--credentials', type=str, default='client_secret_1043911085470-45uf75uncmrvpdlfkvaih6kq05laqjmp.apps.googleusercontent.com.json',
+                       help='Path to Google OAuth credentials JSON file')
     
     args = parser.parse_args()
     

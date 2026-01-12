@@ -61,7 +61,7 @@ class BaseScraper(ABC):
         """Close the WebDriver"""
         if self.driver:
             try:
-            self.driver.quit()
+                self.driver.quit()
             except:
                 pass
             self.driver = None

@@ -17,6 +17,25 @@ from typing import List, Dict, Set
 from queue import Queue
 from scrapers.walmart_scraper import WalmartScraper
 
+# Optional Google Sheets integration
+try:
+    from google_sheets_uploader import upload_new_products_to_sheets, initialize_uploaded_products_cache
+    GOOGLE_SHEETS_ENABLED = True
+except ImportError:
+    GOOGLE_SHEETS_ENABLED = False
+    logger.info("Google Sheets uploader not available (optional feature)")
+
+# Retry queue integration
+try:
+    from retry_queue_manager import (
+        load_retry_queue, save_retry_queue, add_to_retry_queue,
+        remove_from_retry_queue, get_retry_queue_products, clear_retry_queue
+    )
+    RETRY_QUEUE_ENABLED = True
+except ImportError:
+    RETRY_QUEUE_ENABLED = False
+    logger.warning("Retry queue manager not available")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -26,6 +45,11 @@ logger = logging.getLogger(__name__)
 # Thread-safe lock for JSON file operations
 json_lock = threading.Lock()
 queue_lock = threading.Lock()
+retry_queue_lock = threading.Lock()
+
+# Retry queue file
+RETRY_QUEUE_FILE = 'retry_queue.json'
+MAX_RETRY_ATTEMPTS = 3
 
 def load_products_from_spreadsheet(file_path: str) -> pd.DataFrame:
     """Load products from the spreadsheet"""
@@ -484,7 +508,7 @@ def queue_manager(queue: Queue, output_file: str, flush_size: int = 5):
                 save_results_thread_safe(buffer, output_file)
                 buffer = []
 
-def worker_thread(worker_id: int, product_queue: Queue, result_queue: Queue, output_file: str):
+def worker_thread(worker_id: int, product_queue: Queue, result_queue: Queue, output_file: str, retry_queue: Dict[str, int] = None):
     """Worker thread that processes products"""
     scraper = None
     consecutive_blocks = 0  # Track consecutive blocks
@@ -514,6 +538,9 @@ def worker_thread(worker_id: int, product_queue: Queue, result_queue: Queue, out
                 if result is None:
                     consecutive_blocks += 1
                     logger.warning(f"[Worker {worker_id}] ⚠ Blocked/Bot detection for: {product_name} - Skipping and continuing (Consecutive blocks: {consecutive_blocks})")
+                    # Add to retry queue if enabled
+                    if RETRY_QUEUE_ENABLED and retry_queue is not None:
+                        add_to_retry_queue(product_name, retry_queue, retry_queue_lock)
                     
                     # If too many consecutive blocks, recreate the browser
                     if consecutive_blocks >= max_consecutive_blocks:
@@ -541,6 +568,9 @@ def worker_thread(worker_id: int, product_queue: Queue, result_queue: Queue, out
                 if result is None or not isinstance(result, dict):
                     consecutive_blocks += 1
                     logger.warning(f"[Worker {worker_id}] ⚠ Invalid result (None or not dict) for: {product_name} - Treating as blocked (Consecutive blocks: {consecutive_blocks})")
+                    # Add to retry queue if enabled
+                    if RETRY_QUEUE_ENABLED and retry_queue is not None:
+                        add_to_retry_queue(product_name, retry_queue, retry_queue_lock)
                     if consecutive_blocks >= max_consecutive_blocks:
                         logger.warning(f"[Worker {worker_id}] 🔄 Too many consecutive blocks ({consecutive_blocks}), recreating Chrome browser...")
                         try:
@@ -568,10 +598,16 @@ def worker_thread(worker_id: int, product_queue: Queue, result_queue: Queue, out
                 if result.get('found'):
                     result_queue.put(result)
                     logger.info(f"[Worker {worker_id}] ✓ QUEUED: ${result.get('walmart_price')} - {product_name_short}")
+                    # Remove from retry queue if successfully scraped
+                    if RETRY_QUEUE_ENABLED and retry_queue is not None:
+                        remove_from_retry_queue(product_name, retry_queue, retry_queue_lock)
                 else:
                     logger.info(f"[Worker {worker_id}] ✗ Not found: {product_name} (not saved to JSON)")
                     # Reset consecutive blocks on successful search (even if product not found)
                     consecutive_blocks = 0
+                    # Add to retry queue if not found (might be blocked)
+                    if RETRY_QUEUE_ENABLED and retry_queue is not None:
+                        add_to_retry_queue(product_name, retry_queue, retry_queue_lock)
                 
             except Exception as e:
                 logger.error(f"[Worker {worker_id}] Error processing {product_name}: {str(e)}")
@@ -617,6 +653,18 @@ def scrape_parallel(
     existing_product_names = {p.get('product_name') for p in existing_results if p.get('product_name')}
     logger.info(f"Existing results: {len(existing_results)} products")
     
+    # Load retry queue
+    retry_queue = {}
+    if RETRY_QUEUE_ENABLED:
+        retry_queue = load_retry_queue()
+        if retry_queue:
+            retry_count = len([p for p, attempts in retry_queue.items() if attempts < MAX_RETRY_ATTEMPTS])
+            logger.info(f"Retry queue: {retry_count} products to retry")
+    
+    # Note about Google Sheets upload
+    if GOOGLE_SHEETS_ENABLED:
+        logger.info("Google Sheets upload enabled - new products will be uploaded when scraper stops")
+    
     # Load spreadsheet
     df = load_products_from_spreadsheet(spreadsheet_path)
     
@@ -635,8 +683,21 @@ def scrape_parallel(
     product_names = [p for p in product_names if p not in existing_product_names]
     logger.info(f"Products to process: {len(product_names)} (skipped {original_count - len(product_names)} already processed)")
     
+    # Add retry queue products to the list
+    if RETRY_QUEUE_ENABLED and retry_queue:
+        retry_products = get_retry_queue_products(retry_queue)
+        if retry_products:
+            # Add retry products that aren't already in the list
+            for retry_product in retry_products:
+                if retry_product not in product_names and retry_product not in existing_product_names:
+                    product_names.append(retry_product)
+            logger.info(f"Added {len(retry_products)} products from retry queue")
+    
     if not product_names:
         logger.info("All products already processed!")
+        # Save retry queue before exiting
+        if RETRY_QUEUE_ENABLED:
+            save_retry_queue(retry_queue)
         return
     
     # Create queues
@@ -655,7 +716,7 @@ def scrape_parallel(
     # Start worker threads
     workers = []
     for i in range(num_workers):
-        worker = threading.Thread(target=worker_thread, args=(i + 1, product_queue, result_queue, output_file), daemon=True)
+        worker = threading.Thread(target=worker_thread, args=(i + 1, product_queue, result_queue, output_file, retry_queue), daemon=True)
         worker.start()
         workers.append(worker)
         logger.info(f"Worker {i + 1} started")
@@ -683,18 +744,137 @@ def scrape_parallel(
     result_queue.put(None)
     queue_thread.join(timeout=5)
     
+    # Save retry queue before retrying
+    if RETRY_QUEUE_ENABLED:
+        save_retry_queue(retry_queue)
+    
     # Final save
     final_results = load_existing_results(output_file)
     logger.info("\n" + "=" * 70)
-    logger.info("SCRAPING COMPLETE!")
+    logger.info("MAIN SCRAPING COMPLETE!")
     logger.info("=" * 70)
     logger.info(f"Total products processed: {len(product_names)}")
     logger.info(f"Total products in {output_file}: {len(final_results)}")
     logger.info(f"Products found: {sum(1 for r in final_results if r.get('found'))}")
     logger.info("=" * 70)
+    
+    # Retry blocked products
+    if RETRY_QUEUE_ENABLED and retry_queue:
+        retry_products = get_retry_queue_products(retry_queue)
+        if retry_products:
+            logger.info(f"\n" + "=" * 70)
+            logger.info(f"RETRYING BLOCKED PRODUCTS")
+            logger.info("=" * 70)
+            logger.info(f"Products to retry: {len(retry_products)}")
+            logger.info("=" * 70)
+            
+            # Retry the blocked products
+            retry_product_queue = Queue()
+            for product_name in retry_products:
+                retry_product_queue.put(product_name)
+            
+            # Create new result queue for retries
+            retry_result_queue = Queue()
+            
+            # Start queue manager for retries
+            retry_queue_thread = threading.Thread(target=queue_manager, args=(retry_result_queue, output_file, flush_size), daemon=True)
+            retry_queue_thread.start()
+            
+            # Start worker threads for retries
+            retry_workers = []
+            for i in range(num_workers):
+                worker = threading.Thread(target=worker_thread, args=(i + 1, retry_product_queue, retry_result_queue, output_file, retry_queue), daemon=True)
+                worker.start()
+                retry_workers.append(worker)
+                time.sleep(1)
+            
+            logger.info(f"\nRetrying {len(retry_products)} blocked products...")
+            
+            # Wait for retry queue to complete
+            retry_product_queue.join()
+            time.sleep(5)
+            
+            # Signal retry workers to stop
+            for _ in range(num_workers):
+                retry_product_queue.put(None)
+            
+            for worker in retry_workers:
+                worker.join(timeout=10)
+            
+            # Signal retry queue manager to stop
+            retry_result_queue.put(None)
+            retry_queue_thread.join(timeout=5)
+            
+            # Save retry queue again (remove successfully retried products)
+            save_retry_queue(retry_queue)
+            
+            # Final status after retries
+            final_results_after_retry = load_existing_results(output_file)
+            logger.info("\n" + "=" * 70)
+            logger.info("RETRY COMPLETE!")
+            logger.info("=" * 70)
+            logger.info(f"Total products after retry: {len(final_results_after_retry)}")
+            logger.info(f"Products found: {sum(1 for r in final_results_after_retry if r.get('found'))}")
+            
+            # Show remaining retry queue
+            remaining_retries = get_retry_queue_products(retry_queue)
+            if remaining_retries:
+                logger.info(f"Products still in retry queue: {len(remaining_retries)}")
+                logger.info("(These will be retried on next run)")
+            else:
+                logger.info("✅ All products successfully scraped!")
+                clear_retry_queue(retry_queue, retry_queue_lock)
+                save_retry_queue(retry_queue)
+            logger.info("=" * 70)
+    
+    # Upload new products to Google Sheets when scraper stops
+    if GOOGLE_SHEETS_ENABLED:
+        try:
+            logger.info("\n📊 Uploading new products to Google Sheets...")
+            # Initialize cache to know what's already uploaded
+            initialize_uploaded_products_cache()
+            # Get all products from JSON
+            uploaded_count = upload_new_products_to_sheets(final_results)
+            if uploaded_count > 0:
+                logger.info(f"✅ Uploaded {uploaded_count} new products to Google Sheets")
+            else:
+                logger.info("ℹ️ No new products to upload (all already in Google Sheets)")
+        except Exception as e:
+            logger.error(f"❌ Error uploading to Google Sheets: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
 
 if __name__ == '__main__':
     import argparse
+    import signal
+    import sys
+    
+    # Global variable to track if we should upload on exit
+    _should_upload_on_exit = True
+    _output_file_global = None
+    
+    def signal_handler(sig, frame):
+        """Handle Ctrl+C gracefully"""
+        global _should_upload_on_exit, _output_file_global
+        logger.info("\n\n⚠️ Scraper interrupted by user (Ctrl+C)")
+        logger.info("Saving data and uploading to Google Sheets...")
+        
+        if _output_file_global and GOOGLE_SHEETS_ENABLED:
+            try:
+                final_results = load_existing_results(_output_file_global)
+                logger.info(f"📊 Uploading {len(final_results)} products to Google Sheets...")
+                initialize_uploaded_products_cache()
+                uploaded_count = upload_new_products_to_sheets(final_results)
+                if uploaded_count > 0:
+                    logger.info(f"✅ Uploaded {uploaded_count} new products to Google Sheets")
+            except Exception as e:
+                logger.error(f"Error uploading to Google Sheets: {str(e)}")
+        
+        logger.info("Scraper stopped safely. All data saved to JSON file.")
+        sys.exit(0)
+    
+    # Register signal handler for Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
     
     parser = argparse.ArgumentParser(description='Parallel Walmart scraper')
     parser.add_argument('--spreadsheet', type=str, default='WebsiteScrapper 2.ods',
@@ -709,12 +889,17 @@ if __name__ == '__main__':
                        help='Output file to save results')
     
     args = parser.parse_args()
+    _output_file_global = args.output_file
     
-    scrape_parallel(
-        spreadsheet_path=args.spreadsheet,
-        row_numbers_file=args.row_numbers_file,
-        num_workers=args.workers,
-        output_file=args.output_file,
-        flush_size=args.flush_size
-    )
+    try:
+        scrape_parallel(
+            spreadsheet_path=args.spreadsheet,
+            row_numbers_file=args.row_numbers_file,
+            num_workers=args.workers,
+            output_file=args.output_file,
+            flush_size=args.flush_size
+        )
+    except KeyboardInterrupt:
+        # This will be handled by signal_handler, but just in case
+        pass
 
